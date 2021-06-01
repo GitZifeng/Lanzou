@@ -1,6 +1,7 @@
 ﻿using Hzexe.Lanzou.Model.Lanzou;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -8,6 +9,7 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Hzexe.Lanzou
@@ -16,7 +18,7 @@ namespace Hzexe.Lanzou
     {
         readonly CookieContainer cookieContainer;
         const string refer = "https://pc.woozooo.com";
-        const string userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) snap Chromium/71.0.3578.98 Chrome/71.0.3578.98 Safari/537.36";
+        const string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.77 Safari/537.36 Edg/91.0.864.37";
         readonly HttpMessageHandler handler;
 
         public LanzouClient(string cookieStr)
@@ -48,25 +50,37 @@ namespace Hzexe.Lanzou
             };
 #endif
         }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="folder_id">-1=传输到根目录</param>
+        /// <param name="file">文件流</param>
+        /// <param name="filename">文件名</param>
+        /// <param name="filesize">文件大小</param>
+        /// <returns></returns>
         public async Task<LanZouFileResult> FileUploadAsync(string folder_id, Stream file, string filename, int filesize)
         {
             HttpClient client = new HttpClient(handler, false);
             MultipartFormDataContent content = new MultipartFormDataContent();
             content.Add(new StringContent("1"), "task");
-            content.Add(new StringContent(folder_id.ToString()), "folder_id_bb_n");
             content.Add(new StringContent("2"), "ve");
-            content.Add(new StringContent("WU_FILE_0"), "id");
+            content.Add(new StringContent("WU_FILE_0"), "id");//WU_FILE_0=根目录 WU_FILE_1=第一层目录
             content.Add(new StringContent(filename, Encoding.UTF8), "name");
-            content.Add(new StringContent("application/pdf"), "type");
+            content.Add(new StringContent("text/plain"), "type");
             content.Add(new StringContent(ToGMTFormat(DateTime.Now.AddDays(-50))), "lastModifiedDate");
             content.Add(new StringContent(filesize.ToString()), "size");
+            content.Add(new StringContent(folder_id.ToString()), "folder_id_bb_n");
             content.Add(new StreamContent(file), "upload_file", filename);
             client.DefaultRequestHeaders.Add("user-agent", userAgent);
             client.DefaultRequestHeaders.Add("referer", refer);
+            Debug.WriteLine(DateTime.Now);
+            Debug.WriteLine(content);
             string json = null;
             try
-            {
-                var rm = await client.PostAsync("https://up.woozooo.com/fileup.php", content);
+            {//https://pc.woozooo.com/mydisk.php
+                //https://pc.woozooo.com/fileup.php
+                var rm = await client.PostAsync("https://pc.woozooo.com/fileup.php", content);
                 if (rm.IsSuccessStatusCode)
                 {
                     json = await rm.Content.ReadAsStringAsync();
@@ -80,7 +94,7 @@ namespace Hzexe.Lanzou
             {
                 client.Dispose();
             }
-
+            Debug.WriteLine(json);
             var lanZouFileResult = System.Text.Json.JsonSerializer.Deserialize<LanZouFileResult>(json);
             var file_id = lanZouFileResult.text[0].id;
             return lanZouFileResult;
@@ -186,9 +200,12 @@ namespace Hzexe.Lanzou
 
         public async Task<string> FileDownloadAsync(string url)
         {
+        LinkInfoException:
             HttpClient client = new HttpClient(handler, false);
             client.DefaultRequestHeaders.Add("user-agent", userAgent);
             client.DefaultRequestHeaders.Add("referer", url);
+
+            //第一次请求，获取iframe的地址
             var res = await client.GetAsync(url);
             res.EnsureSuccessStatusCode();
             var html = await res.Content.ReadAsStringAsync();
@@ -196,27 +213,15 @@ namespace Hzexe.Lanzou
             var src = Regex.Match(html, p).Groups[1].Value;
             Uri u = new Uri(url);
             var hostbase = u.GetComponents(UriComponents.SchemeAndServer, UriFormat.Unescaped);
-
             var frame = hostbase + src;
 
+            //第二次请求得到js里的json数据里的sign
             res = await client.GetAsync(frame);
             res.EnsureSuccessStatusCode();
             html = await res.Content.ReadAsStringAsync();
-            /*
-            var cgcroc = 'UDYHOV1sBzZUXQs0CjoHO1c_aV2UEYgA0Cj9bZFM6Bz8JL1V2D29UMQFiA2wHZFVnA2ADNwVtBzwDPA_c_c';//var harse = 'ate';
-		var pposturl = '?v2';//var harse = harse;var cess = cess;
-			//var ajaxup = '';
-		$.ajax({
-			type : 'post',
-			url : '/ajaxm.php',
-			//data : { 'action':'downprocess','sign':pposturl,'ves':1 },
-		data : { 'action':'downprocess','sign':cgcroc,'ves':1 }, 
-             */
+            var mc = Regex.Match(html, @"var pdownload = '(.+?)'");
 
-            var mc = Regex.Match(html, @"var cgcroc = '(.+?)'");
-            //var json = mc.Groups[1].Value.Replace("'", "\"");
-            //JsonDocument json1 = JsonDocument.Parse(json);
-            //var ps = json1.RootElement.EnumerateObject().Select(x => new KeyValuePair<string, string>(x.Name, x.Value.ToString()));
+            //第三次请求 通过参数发起post请求,返回json数据
             Dictionary<string, string> ps = new Dictionary<string, string>(5)
             {
             { "action","downprocess"},
@@ -224,25 +229,33 @@ namespace Hzexe.Lanzou
             { "ves","1"},
             };
             FormUrlEncodedContent encodedContent = new FormUrlEncodedContent(ps);
-            //var postContent = new StringContent(json, Encoding.UTF8, "application/json");
             var linkUrl = hostbase + "/ajaxm.php";
-
             res = await client.PostAsync(linkUrl, encodedContent);
             res.EnsureSuccessStatusCode();
             html = await res.Content.ReadAsStringAsync();
-            var linkinfo = System.Text.Json.JsonSerializer.Deserialize<GetLinkResponse>(html);
+            GetLinkResponse linkinfo = null;
+            try
+            {
+                linkinfo = System.Text.Json.JsonSerializer.Deserialize<GetLinkResponse>(html);
+            }
+            catch 
+            {
+                goto LinkInfoException;
+            }
+
             if (!linkinfo.zt.HasValue || linkinfo.zt.Value != 1)
                 throw new Exception("获取直链失败，状态码：" + html);
             res = await client.GetAsync(linkinfo.FullUrl);
             res.EnsureSuccessStatusCode();
             html = await res.Content.ReadAsStringAsync();
+
+            //通过json的数据拼接出最终的URL发起第最终请求,并得到响应信息头
             if (html.Contains("网络异常"))
             {
-                System.Threading.Thread.Sleep(2000);//need keep this
+                Thread.Sleep(2000);
                 client.DefaultRequestHeaders.Remove("referer");
                 client.DefaultRequestHeaders.Add("referer", linkinfo.FullUrl);
                 client.DefaultRequestHeaders.Add("X-Requested-With", "XMLHttpRequest");
-                //需要二次验证
                 var file_token = Regex.Match(html, @"'file':'(.+?)'").Groups[1].Value;
                 var file_sign = Regex.Match(html, @"'sign':'(.+?)'").Groups[1].Value;
                 var check_api = linkinfo.dom + "/file/ajax.php";
@@ -266,7 +279,6 @@ namespace Hzexe.Lanzou
                 //重定向后的真直链
                 return res.Content.Headers.ContentLocation.ToString();
             }
-
         }
 
 
